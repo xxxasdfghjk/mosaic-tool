@@ -2,6 +2,7 @@ import os
 import cv2
 import numpy as np
 import pyautogui
+import sys
 from tkinter import (
     Tk,
     Canvas,
@@ -18,7 +19,7 @@ from PIL import Image, ImageTk
 
 
 class MosaicTool:
-    def __init__(self, root):
+    def __init__(self, root, path=None):
         self.root = root
         self.root.title("Mosaic Tool")
 
@@ -148,6 +149,8 @@ class MosaicTool:
 
         self.image_id = None
         self.is_painting = False
+        if not path is None:
+            self.root.after(100, lambda: self.open_folder(path))
 
     def update_current_page(self, offset):
         if (
@@ -206,9 +209,8 @@ class MosaicTool:
             self.brush_size_scale.get()
         )  # Update brush size from the scale
 
-    def load_folder(self):
-        folder = filedialog.askdirectory()
-        if folder:
+    def open_folder(self, folder):
+        if os.path.exists(folder) and os.path.isdir(folder):
             self.image_list = [
                 os.path.join(folder, f)
                 for f in os.listdir(folder)
@@ -217,6 +219,10 @@ class MosaicTool:
             self.image_index = 0
             self.update_current_page(0)
             self.load_image()
+
+    def load_folder(self):
+        folder = filedialog.askdirectory()
+        self.open_folder(folder)
 
     def load_image(self):
         if self.image_index < 0 or self.image_index >= len(self.image_list):
@@ -521,6 +527,7 @@ class MosaicTool:
 
 
 if __name__ == "__main__":
+    arg = sys.argv[1] if len(sys.argv) > 1 else None
     root = Tk()
-    app = MosaicTool(root)
+    app = MosaicTool(root, arg)
     root.mainloop()
