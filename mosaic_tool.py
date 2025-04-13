@@ -14,8 +14,10 @@ from tkinter import (
     Label,
     BOTTOM,
     StringVar,
+    BooleanVar,  # ここを追加
 )
 from PIL import Image, ImageTk
+from tkinter import ttk  # ttkをインポート
 
 
 class MosaicTool:
@@ -152,6 +154,41 @@ class MosaicTool:
         if not path is None:
             self.root.after(100, lambda: self.open_folder(path))
 
+        # モード表示用のラベルを追加
+        self.mode_label = Label(self.sidebar, text="Mode: Brush", font=("Arial", 12))
+        self.mode_label.pack(pady=10)
+
+        # 範囲選択モードの初期化
+        self.is_selecting_area = BooleanVar(value=False)
+        self.selection_points = []
+
+        # 範囲選択モードのスイッチボタンを追加
+        self.select_area_switch = ttk.Checkbutton(
+            self.sidebar,
+            text="Select Area",
+            variable=self.is_selecting_area,
+            command=self.toggle_select_area,
+            style="Switch.TCheckbutton",
+        )
+        self.select_area_switch.pack(pady=10)
+
+        # 初期状態ではブラシモードのイベントをバインド
+        self.bind_brush_mode_events()
+
+    def bind_brush_mode_events(self):
+        """ブラシモード用のイベントをバインド"""
+        self.canvas.bind("<B1-Motion>", self.paint)
+        self.canvas.bind("<Button-1>", self.start_paint)
+        self.canvas.bind("<ButtonRelease-1>", self.end_paint)
+
+    def bind_select_area_mode_events(self):
+        """範囲選択モード用のイベントをバインド"""
+        self.canvas.bind("<Button-1>", self.handle_area_click)
+        self.canvas.bind("<Double-1>", self.complete_area_selection)
+        # 範囲選択モードではドラッグやリリースイベントを無効化
+        self.canvas.unbind("<B1-Motion>")
+        self.canvas.unbind("<ButtonRelease-1>")
+
     def update_current_page(self, offset):
         if (
             self.image_index + offset < len(self.image_list)
@@ -190,6 +227,11 @@ class MosaicTool:
         if key == "bracketright":
             self.change_brush_size(-5)
             self.display_image()
+        if key == "r":  # 範囲選択モードとブラシモードを切り替える
+            self.is_selecting_area.set(not self.is_selecting_area.get())
+            self.toggle_select_area()
+        if key == "c":  # 選択範囲をリセット
+            self.reset_selection()
 
     def change_brush_size(self, delta):
         # 現在のブラシサイズを変更
@@ -296,25 +338,56 @@ class MosaicTool:
         self.canvas.config(scrollregion=self.canvas.bbox("all"))
 
     def hover(self, event):
+        """マウスホバー時の処理"""
         if self.current_image is None:
             return
 
         x, y = event.x, event.y
         (lu, lb, ru, rb) = self.corner_points()
 
+        # マウスが画像外の場合は何もしない
         if x < lu[0] or x > ru[0] or y < lu[1] or y > rb[1]:
+            self.canvas.delete("hover_cross")
+            self.canvas.delete("hover_line")
             return
-        x_rate = 1 - (ru[0] - x) / (ru[0] - lu[0])
-        y_rate = 1 - (rb[1] - y) / (rb[1] - lu[1])
+
+        # 選択範囲モードの場合は十字マークとガイドラインを表示
+        if self.is_selecting_area.get():
+            self.canvas.delete("hover_cross")  # 既存の十字マークを削除
+            self.canvas.delete("hover_line")  # 既存のガイドラインを削除
+
+            # 十字マークを描画
+            cross_size = 10  # 十字のサイズ
+            self.canvas.create_line(
+                x - cross_size, y, x + cross_size, y, fill="red", width=2, tags="hover_cross"
+            )
+            self.canvas.create_line(
+                x, y - cross_size, x, y + cross_size, fill="red", width=2, tags="hover_cross"
+            )
+
+            # ガイドラインを描画
+            if self.selection_points:
+                last_x, last_y = self.selection_points[-1]
+                # 画像座標をキャンバス座標に変換
+                last_canvas_x = last_x * self.scale_factor + lu[0]
+                last_canvas_y = last_y * self.scale_factor + lu[1]
+                self.canvas.create_line(
+                    last_canvas_x, last_canvas_y, x, y, fill="blue", width=2, tags="hover_line"
+                )
+            return
+
+        # ブラシモードの場合はホバーマスクを表示
+        self.canvas.delete("hover_cross")  # 十字マークを削除（ブラシモードでは不要）
+        self.canvas.delete("hover_line")  # ガイドラインを削除（ブラシモードでは不要）
+
+        x_rate = (x - lu[0]) / (ru[0] - lu[0])
+        y_rate = (y - lu[1]) / (rb[1] - lu[1])
         (image_width, image_height) = self.image_size()
         circle_center_x = int(x_rate * image_width)
         circle_center_y = int(y_rate * image_height)
 
-        self.hover_mask_layer = np.zeros(
-            (self.current_image.shape[0], self.current_image.shape[1]), dtype=np.uint8
-        )
-
-        # Define the hover area to be the area around the cursor
+        # ホバーマスクを更新
+        self.hover_mask_layer.fill(0)  # マスクをリセット
         cv2.circle(
             self.hover_mask_layer,
             (circle_center_x, circle_center_y),
@@ -521,9 +594,116 @@ class MosaicTool:
             # Undo mask: restore the previous mask state
             self.mask_layer = last_action[1]
             self.display_image()
+        elif last_action[0] == "selection":
+            # Undo selection: restore the previous selection points
+            self.selection_points = last_action[1]
+            self.display_image()
+            self.redraw_selection()
+
+    def redraw_selection(self):
+        """選択状態を再描画"""
+        self.canvas.delete("hover_line")  # 既存のガイドラインを削除
+        if len(self.selection_points) > 1:
+            for i in range(1, len(self.selection_points)):
+                (lu, _, _, _) = self.corner_points()
+                self.canvas.create_line(
+                    self.selection_points[i - 1][0] * self.scale_factor + lu[0],
+                    self.selection_points[i - 1][1] * self.scale_factor + lu[1],
+                    self.selection_points[i][0] * self.scale_factor + lu[0],
+                    self.selection_points[i][1] * self.scale_factor + lu[1],
+                    fill="red",
+                    width=2,
+                )
 
     def redo(self):
         pass  # Implement redo logic
+
+    def toggle_select_area(self):
+        """範囲選択モードの切り替え"""
+        if self.is_selecting_area.get():
+            self.mode_label.config(text="Mode: Select Area")  # モード表示を更新
+            self.bind_select_area_mode_events()  # 範囲選択モードのイベントをバインド
+        else:
+            self.mode_label.config(text="Mode: Brush")  # モード表示を更新
+            self.bind_brush_mode_events()  # ブラシモードのイベントをバインド
+            self.display_image()  # 選択をキャンセルして画像を再描画
+
+        # 残像を防ぐために hover_mask_layer をリセット
+        if self.current_image is not None:
+            self.hover_mask_layer.fill(0)  # マスクをリセット
+        self.canvas.delete("hover_cross")  # 十字マークを削除
+        self.canvas.delete("hover_line")  # ガイドラインを削除
+
+        # 選択中の点をリセット
+        self.selection_points = []
+
+    def handle_area_click(self, event):
+        """範囲選択モードでクリックした点を記録し、線を描画"""
+        if not self.is_selecting_area.get():
+            return
+
+        # キャンバス座標を取得
+        canvas_x, canvas_y = event.x, event.y
+
+        # キャンバス座標を画像座標に変換
+        (lu, lb, ru, rb) = self.corner_points()
+        if canvas_x < lu[0] or canvas_x > ru[0] or canvas_y < lu[1] or canvas_y > rb[1]:
+            return  # クリックが画像外の場合は無視
+
+        x_rate = (canvas_x - lu[0]) / (ru[0] - lu[0])
+        y_rate = (canvas_y - lu[1]) / (rb[1] - lu[1])
+        (image_width, image_height) = self.image_size()
+        image_x = int(x_rate * image_width)
+        image_y = int(y_rate * image_height)
+
+        # Undoスタックに現在の選択状態を保存
+        self.undo_stack.append(("selection", self.selection_points.copy()))
+
+        # 選択した点を記録
+        self.selection_points.append((image_x, image_y))
+
+        # キャンバス上に線を描画
+        if len(self.selection_points) > 1:
+            self.canvas.create_line(
+                self.selection_points[-2][0] * self.scale_factor + lu[0],
+                self.selection_points[-2][1] * self.scale_factor + lu[1],
+                self.selection_points[-1][0] * self.scale_factor + lu[0],
+                self.selection_points[-1][1] * self.scale_factor + lu[1],
+                fill="red",
+                width=2,
+            )
+
+    def complete_area_selection(self, event):
+        """ダブルクリックで範囲を閉じ、マスクに反映"""
+        if not self.is_selecting_area or len(self.selection_points) < 3:
+            return
+
+        # 最初の点と最後の点を結ぶ
+        (lu, lb, ru, rb) = self.corner_points()
+        self.canvas.create_line(
+            self.selection_points[-1][0] * self.scale_factor + lu[0],
+            self.selection_points[-1][1] * self.scale_factor + lu[1],
+            self.selection_points[0][0] * self.scale_factor + lu[0],
+            self.selection_points[0][1] * self.scale_factor + lu[1],
+            fill="red",
+            width=2,
+        )
+
+        # 範囲をマスクに反映
+        polygon = [(x, y) for x, y in self.selection_points]
+        cv2.fillPoly(self.mask_layer, [np.array(polygon, dtype=np.int32)], 255)
+
+        # 選択ポイントをリセットして新しい範囲選択を開始できるようにする
+        self.selection_points = []
+        self.display_image()
+
+    def reset_selection(self):
+        """現在の選択範囲をリセット"""
+        self.selection_points = []  # 選択ポイントをリセット
+        self.mask_layer.fill(0)  # マスクレイヤーをリセット
+        self.canvas.delete("hover_line")  # キャンバス上のガイドラインを削除
+        self.canvas.delete("hover_cross")  # 十字マークも削除
+        self.display_image()  # 画像を再描画
 
 
 if __name__ == "__main__":
